@@ -517,7 +517,7 @@ Title: `[Task] Back-end Testing`
 #### 1.5.2. Review and curate the tests
 
 1. [Open the file](../../../wiki/vs-code.md#open-the-file):
-   [`backend/tests/unit/test_interactions_ai.py`](../../../backend/tests/unit/test_interactions_ai.py).
+   `backend/tests/unit/test_interactions_ai.py`.
 
 2. Review each generated test against the following criteria:
 
