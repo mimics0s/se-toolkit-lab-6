@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """
-Regression tests for agent.py
+Regression tests for the Documentation Agent (Task 2).
 
-Tests verify that agent.py returns valid JSON with required fields.
+These tests verify that the agent correctly uses tools (read_file, list_files)
+and returns properly formatted JSON responses.
+
+Usage:
+    uv run pytest test_agent.py -v
 """
 
 import json
@@ -11,105 +15,258 @@ import sys
 from pathlib import Path
 
 
-def test_agent_output_is_valid_json():
-    """Test that agent.py returns valid JSON output."""
-    agent_path = Path(__file__).parent / "agent.py"
+def run_agent(question: str) -> dict:
+    """
+    Run the agent with a question and parse the JSON output.
+
+    Args:
+        question: The question to ask the agent
+
+    Returns:
+        Parsed JSON response as a dict
+
+    Raises:
+        AssertionError: If the agent fails or returns invalid JSON
+    """
+    # Get the project root directory (parent of test file)
+    project_root = Path(__file__).parent.resolve()
     
-    if not agent_path.exists():
-        print("SKIP: agent.py not found", file=sys.stderr)
-        return
-    
-    env_file = Path(__file__).parent / ".env.agent.secret"
-    if not env_file.exists():
-        print("SKIP: .env.agent.secret not found, create from .env.agent.secret.example", file=sys.stderr)
-        return
-    
+    # Run the agent as a subprocess using uv run
     result = subprocess.run(
-        ["uv", "run", str(agent_path), "What is 2 + 2?"],
+        ["uv", "run", "agent.py", question],
         capture_output=True,
         text=True,
         timeout=120,
+        cwd=project_root
     )
-    
-    print(f"stdout: {result.stdout}", file=sys.stderr)
-    print(f"stderr: {result.stderr}", file=sys.stderr)
-    print(f"returncode: {result.returncode}", file=sys.stderr)
-    
-    assert result.returncode == 0, f"agent.py failed with code {result.returncode}: {result.stderr}"
-    
+
+    # Check that the agent didn't crash
+    assert result.returncode == 0, f"Agent crashed with code {result.returncode}\nStderr: {result.stderr}"
+
+    # Parse the JSON output (stdout should be a single JSON line)
     try:
-        output = json.loads(result.stdout.strip())
+        response = json.loads(result.stdout.strip())
     except json.JSONDecodeError as e:
-        assert False, f"Output is not valid JSON: {e}\nOutput: {result.stdout}"
-    
-    assert "answer" in output, "Missing 'answer' field in output"
-    assert "tool_calls" in output, "Missing 'tool_calls' field in output"
-    assert isinstance(output["answer"], str), "'answer' must be a string"
-    assert isinstance(output["tool_calls"], list), "'tool_calls' must be a list"
-    
-    print("PASS: Output is valid JSON with required fields", file=sys.stderr)
-    print(f"Answer preview: {output['answer'][:100]}...", file=sys.stderr)
+        raise AssertionError(f"Agent output is not valid JSON: {e}\nStdout: {result.stdout}")
+
+    return response
 
 
-def test_agent_empty_question_fails():
-    """Test that agent.py fails with empty question."""
-    agent_path = Path(__file__).parent / "agent.py"
-    
-    if not agent_path.exists():
-        print("SKIP: agent.py not found", file=sys.stderr)
-        return
-    
-    result = subprocess.run(
-        ["uv", "run", str(agent_path), ""],
-        capture_output=True,
-        text=True,
-        timeout=30,
+def test_merge_conflict_question():
+    """
+    Test that the agent uses read_file to answer a merge conflict question.
+
+    Expected behavior:
+    - Agent should call read_file with a path containing 'git-workflow.md'
+    - Source should reference wiki/git-workflow.md or wiki/git.md
+    """
+    question = "How do you resolve a merge conflict?"
+    print(f"\nRunning test: {question}", file=sys.stderr)
+
+    response = run_agent(question)
+
+    # Verify response structure
+    assert "answer" in response, "Response missing 'answer' field"
+    assert "source" in response, "Response missing 'source' field"
+    assert "tool_calls" in response, "Response missing 'tool_calls' field"
+
+    # Verify tool_calls is not empty (agent should have used tools)
+    tool_calls = response["tool_calls"]
+    assert len(tool_calls) > 0, "Expected agent to use at least one tool"
+
+    # Verify that read_file was called with git-workflow.md
+    # (The agent may also read other files, but git-workflow.md should be among them)
+    read_file_calls = [
+        tc for tc in tool_calls
+        if tc.get("tool") == "read_file"
+    ]
+    assert len(read_file_calls) > 0, "Expected agent to call read_file"
+
+    # Check that at least one read_file call has git-workflow.md in the path
+    found_git_workflow = False
+    for call in read_file_calls:
+        path = call.get("args", {}).get("path", "")
+        if "git-workflow.md" in path:
+            found_git_workflow = True
+            break
+
+    assert found_git_workflow, (
+        f"Expected read_file to be called with path containing 'git-workflow.md'. "
+        f"Actual paths: {[tc.get('args', {}).get('path', '') for tc in read_file_calls]}"
     )
-    
-    assert result.returncode != 0, "agent.py should fail with empty question"
-    print("PASS: Empty question correctly rejected", file=sys.stderr)
 
-
-def test_agent_missing_args_fails():
-    """Test that agent.py fails without arguments."""
-    agent_path = Path(__file__).parent / "agent.py"
-    
-    if not agent_path.exists():
-        print("SKIP: agent.py not found", file=sys.stderr)
-        return
-    
-    result = subprocess.run(
-        ["uv", "run", str(agent_path)],
-        capture_output=True,
-        text=True,
-        timeout=30,
+    # Verify source references a wiki file (should contain wiki/ and .md)
+    source = response["source"]
+    assert "wiki/" in source and ".md" in source, (
+        f"Expected source to reference a wiki file (e.g., wiki/git.md), got: {source}"
     )
-    
-    assert result.returncode != 0, "agent.py should fail without arguments"
-    print("PASS: Missing arguments correctly rejected", file=sys.stderr)
+
+    # Verify answer is not empty
+    assert len(response["answer"]) > 0, "Answer should not be empty"
+
+    print(f"Test passed! Answer: {response['answer'][:100]}...", file=sys.stderr)
+    print(f"Source: {source}", file=sys.stderr)
+    print(f"Tool calls: {len(tool_calls)}", file=sys.stderr)
+
+
+def test_wiki_files_question():
+    """
+    Test that the agent uses list_files to answer a wiki files question.
+
+    Expected behavior:
+    - Agent should call list_files with path "wiki" or similar
+    - Result should contain expected wiki files
+    """
+    question = "What files are in the wiki?"
+    print(f"\nRunning test: {question}", file=sys.stderr)
+
+    response = run_agent(question)
+
+    # Verify response structure
+    assert "answer" in response, "Response missing 'answer' field"
+    assert "source" in response, "Response missing 'source' field"
+    assert "tool_calls" in response, "Response missing 'tool_calls' field"
+
+    # Verify tool_calls is not empty
+    tool_calls = response["tool_calls"]
+    assert len(tool_calls) > 0, "Expected agent to use at least one tool"
+
+    # Verify that list_files was called
+    list_files_calls = [
+        tc for tc in tool_calls
+        if tc.get("tool") == "list_files"
+    ]
+    assert len(list_files_calls) > 0, "Expected agent to call list_files"
+
+    # Check that at least one list_files call has "wiki" in the path
+    found_wiki_path = False
+    for call in list_files_calls:
+        path = call.get("args", {}).get("path", "")
+        if "wiki" in path.lower():
+            found_wiki_path = True
+            break
+
+    assert found_wiki_path, (
+        f"Expected list_files to be called with path containing 'wiki'. "
+        f"Actual paths: {[tc.get('args', {}).get('path', '') for tc in list_files_calls]}"
+    )
+
+    # Verify that the result contains expected wiki files
+    wiki_result = None
+    for call in list_files_calls:
+        path = call.get("args", {}).get("path", "")
+        if "wiki" in path.lower():
+            wiki_result = call.get("result", "")
+            break
+
+    assert wiki_result, "Expected list_files to return a result"
+    assert "git-workflow.md" in wiki_result, (
+        f"Expected wiki listing to contain 'git-workflow.md'. Got: {wiki_result[:200]}"
+    )
+
+    # Verify answer is not empty
+    assert len(response["answer"]) > 0, "Answer should not be empty"
+
+    print(f"Test passed! Answer: {response['answer'][:100]}...", file=sys.stderr)
+    print(f"Wiki files found: {len(wiki_result.split())}", file=sys.stderr)
+    print(f"Tool calls: {len(tool_calls)}", file=sys.stderr)
+
+
+def test_backend_framework_question():
+    """
+    Test that the agent uses read_file to answer a backend framework question.
+
+    Expected behavior:
+    - Agent should call read_file on backend source code
+    - Answer should indicate FastAPI
+    """
+    question = "What framework does the backend use?"
+    print(f"\nRunning test: {question}", file=sys.stderr)
+
+    response = run_agent(question)
+
+    # Verify response structure
+    assert "answer" in response, "Response missing 'answer' field"
+    assert "tool_calls" in response, "Response missing 'tool_calls' field"
+
+    # Verify tool_calls is not empty
+    tool_calls = response["tool_calls"]
+    assert len(tool_calls) > 0, "Expected agent to use at least one tool"
+
+    # Verify that read_file was called (not query_api - this is a code question)
+    read_file_calls = [
+        tc for tc in tool_calls
+        if tc.get("tool") == "read_file"
+    ]
+    assert len(read_file_calls) > 0, (
+        "Expected agent to call read_file for source code question. "
+        f"Actual tools used: {[tc.get('tool') for tc in tool_calls]}"
+    )
+
+    # Verify answer mentions FastAPI
+    answer = response["answer"].lower()
+    assert "fastapi" in answer, (
+        f"Expected answer to mention 'FastAPI'. Got: {response['answer'][:200]}"
+    )
+
+    print(f"Test passed! Answer: {response['answer'][:100]}...", file=sys.stderr)
+    print(f"Tool calls: {len(tool_calls)}", file=sys.stderr)
+
+
+def test_database_item_count_question():
+    """
+    Test that the agent uses query_api to answer a database item count question.
+
+    Expected behavior:
+    - Agent should call query_api with GET /items/
+    - Answer should contain a number > 0
+    """
+    question = "How many items are in the database?"
+    print(f"\nRunning test: {question}", file=sys.stderr)
+
+    response = run_agent(question)
+
+    # Verify response structure
+    assert "answer" in response, "Response missing 'answer' field"
+    assert "tool_calls" in response, "Response missing 'tool_calls' field"
+
+    # Verify tool_calls is not empty
+    tool_calls = response["tool_calls"]
+    assert len(tool_calls) > 0, "Expected agent to use at least one tool"
+
+    # Verify that query_api was called
+    query_api_calls = [
+        tc for tc in tool_calls
+        if tc.get("tool") == "query_api"
+    ]
+    assert len(query_api_calls) > 0, (
+        "Expected agent to call query_api for database question. "
+        f"Actual tools used: {[tc.get('tool') for tc in tool_calls]}"
+    )
+
+    # Verify query_api was called with correct arguments
+    for call in query_api_calls:
+        args = call.get("args", {})
+        assert args.get("method") == "GET", (
+            f"Expected GET method, got: {args.get('method')}"
+        )
+        assert "/items/" in args.get("path", ""), (
+            f"Expected /items/ path, got: {args.get('path')}"
+        )
+
+    # Verify answer contains a number > 0
+    import re
+    answer = response["answer"]
+    numbers = re.findall(r'\d+', answer)
+    assert len(numbers) > 0 and any(int(n) > 0 for n in numbers), (
+        f"Expected answer to contain a number > 0. Got: {answer[:200]}"
+    )
+
+    print(f"Test passed! Answer: {response['answer'][:100]}...", file=sys.stderr)
+    print(f"Tool calls: {len(tool_calls)}", file=sys.stderr)
 
 
 if __name__ == "__main__":
-    print("Running regression tests for agent.py", file=sys.stderr)
-    print("=" * 50, file=sys.stderr)
-    
-    try:
-        test_agent_output_is_valid_json()
-    except AssertionError as e:
-        print(f"FAIL: test_agent_output_is_valid_json - {e}", file=sys.stderr)
-        sys.exit(1)
-    
-    try:
-        test_agent_empty_question_fails()
-    except AssertionError as e:
-        print(f"FAIL: test_agent_empty_question_fails - {e}", file=sys.stderr)
-        sys.exit(1)
-    
-    try:
-        test_agent_missing_args_fails()
-    except AssertionError as e:
-        print(f"FAIL: test_agent_missing_args_fails - {e}", file=sys.stderr)
-        sys.exit(1)
-    
-    print("=" * 50, file=sys.stderr)
-    print("All tests passed!", file=sys.stderr)
+    # Run tests if executed directly
+    import pytest
+    pytest.main([__file__, "-v"])
