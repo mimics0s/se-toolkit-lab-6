@@ -172,6 +172,100 @@ def test_wiki_files_question():
     print(f"Tool calls: {len(tool_calls)}", file=sys.stderr)
 
 
+def test_backend_framework_question():
+    """
+    Test that the agent uses read_file to answer a backend framework question.
+
+    Expected behavior:
+    - Agent should call read_file on backend source code
+    - Answer should indicate FastAPI
+    """
+    question = "What framework does the backend use?"
+    print(f"\nRunning test: {question}", file=sys.stderr)
+
+    response = run_agent(question)
+
+    # Verify response structure
+    assert "answer" in response, "Response missing 'answer' field"
+    assert "tool_calls" in response, "Response missing 'tool_calls' field"
+
+    # Verify tool_calls is not empty
+    tool_calls = response["tool_calls"]
+    assert len(tool_calls) > 0, "Expected agent to use at least one tool"
+
+    # Verify that read_file was called (not query_api - this is a code question)
+    read_file_calls = [
+        tc for tc in tool_calls
+        if tc.get("tool") == "read_file"
+    ]
+    assert len(read_file_calls) > 0, (
+        "Expected agent to call read_file for source code question. "
+        f"Actual tools used: {[tc.get('tool') for tc in tool_calls]}"
+    )
+
+    # Verify answer mentions FastAPI
+    answer = response["answer"].lower()
+    assert "fastapi" in answer, (
+        f"Expected answer to mention 'FastAPI'. Got: {response['answer'][:200]}"
+    )
+
+    print(f"Test passed! Answer: {response['answer'][:100]}...", file=sys.stderr)
+    print(f"Tool calls: {len(tool_calls)}", file=sys.stderr)
+
+
+def test_database_item_count_question():
+    """
+    Test that the agent uses query_api to answer a database item count question.
+
+    Expected behavior:
+    - Agent should call query_api with GET /items/
+    - Answer should contain a number > 0
+    """
+    question = "How many items are in the database?"
+    print(f"\nRunning test: {question}", file=sys.stderr)
+
+    response = run_agent(question)
+
+    # Verify response structure
+    assert "answer" in response, "Response missing 'answer' field"
+    assert "tool_calls" in response, "Response missing 'tool_calls' field"
+
+    # Verify tool_calls is not empty
+    tool_calls = response["tool_calls"]
+    assert len(tool_calls) > 0, "Expected agent to use at least one tool"
+
+    # Verify that query_api was called
+    query_api_calls = [
+        tc for tc in tool_calls
+        if tc.get("tool") == "query_api"
+    ]
+    assert len(query_api_calls) > 0, (
+        "Expected agent to call query_api for database question. "
+        f"Actual tools used: {[tc.get('tool') for tc in tool_calls]}"
+    )
+
+    # Verify query_api was called with correct arguments
+    for call in query_api_calls:
+        args = call.get("args", {})
+        assert args.get("method") == "GET", (
+            f"Expected GET method, got: {args.get('method')}"
+        )
+        assert "/items/" in args.get("path", ""), (
+            f"Expected /items/ path, got: {args.get('path')}"
+        )
+
+    # Verify answer contains a number > 0
+    import re
+    answer = response["answer"]
+    numbers = re.findall(r'\d+', answer)
+    assert len(numbers) > 0 and any(int(n) > 0 for n in numbers), (
+        f"Expected answer to contain a number > 0. Got: {answer[:200]}"
+    )
+
+    print(f"Test passed! Answer: {response['answer'][:100]}...", file=sys.stderr)
+    print(f"Tool calls: {len(tool_calls)}", file=sys.stderr)
+
+
 if __name__ == "__main__":
     # Run tests if executed directly
     import pytest

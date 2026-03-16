@@ -29,28 +29,39 @@ MAX_TOOL_CALLS = 10
 
 def load_env_vars() -> dict:
     """
-    Load environment variables from .env.agent.secret in the project root.
+    Load environment variables from .env files in the project root.
+
+    Loads:
+    - .env.agent.secret: LLM_API_KEY, LLM_API_BASE, LLM_MODEL
+    - .env.docker.secret: LMS_API_KEY
 
     Returns:
-        dict with LLM_API_KEY, LLM_API_BASE, LLM_MODEL
+        dict with api_key, api_base, model, lms_api_key, api_base_url
 
     Raises:
         SystemExit: If required variables are missing
     """
-    # Find .env.agent.secret in the project root (same directory as agent.py)
+    # Find .env files in the project root (same directory as agent.py)
     script_dir = Path(__file__).parent
-    env_file = script_dir / ".env.agent.secret"
+    agent_env_file = script_dir / ".env.agent.secret"
+    docker_env_file = script_dir / ".env.docker.secret"
 
-    # Load from file if it exists
-    if env_file.exists():
-        load_dotenv(dotenv_path=env_file)
+    # Load from files if they exist
+    if agent_env_file.exists():
+        load_dotenv(dotenv_path=agent_env_file, override=False)
+    if docker_env_file.exists():
+        load_dotenv(dotenv_path=docker_env_file, override=False)
 
-    # Get required variables
+    # Get LLM variables
     api_key = os.getenv("LLM_API_KEY")
     api_base = os.getenv("LLM_API_BASE")
     model = os.getenv("LLM_MODEL")
 
-    # Validate
+    # Get API variables
+    lms_api_key = os.getenv("LMS_API_KEY")
+    api_base_url = os.getenv("AGENT_API_BASE_URL", "http://localhost:42002")
+
+    # Validate LLM variables
     if not api_key:
         print("Error: LLM_API_KEY not found in environment or .env.agent.secret", file=sys.stderr)
         sys.exit(1)
@@ -66,7 +77,9 @@ def load_env_vars() -> dict:
     return {
         "api_key": api_key,
         "api_base": api_base,
-        "model": model
+        "model": model,
+        "lms_api_key": lms_api_key,
+        "api_base_url": api_base_url
     }
 
 
@@ -203,6 +216,96 @@ def list_files(path: str) -> str:
         return error_msg
 
 
+def query_api(method: str, path: str, body: str = None, auth: bool = True) -> str:
+    """
+    Call the backend API with optional authentication.
+
+    Args:
+        method: HTTP method (GET, POST, PUT, DELETE, etc.)
+        path: API path (e.g., '/items/', '/analytics/completion-rate')
+        body: Optional JSON request body (for POST/PUT requests)
+        auth: Whether to send authentication header (default: True)
+
+    Returns:
+        JSON string with 'status_code' and 'body' fields
+    """
+    import httpx
+
+    print(f"Tool: query_api('{method}', '{path}', auth={auth})", file=sys.stderr)
+
+    # Get configuration from environment
+    base_url = os.getenv("AGENT_API_BASE_URL", "http://localhost:42002")
+    lms_api_key = os.getenv("LMS_API_KEY")
+
+    # Build the URL
+    url = f"{base_url}{path}"
+
+    # Prepare headers with optional authentication
+    headers = {}
+    if auth and lms_api_key:
+        headers["Authorization"] = f"Bearer {lms_api_key}"
+
+    try:
+        # Make the request synchronously
+        with httpx.Client() as client:
+            method_upper = method.upper()
+
+            if method_upper == "GET":
+                response = client.get(url, headers=headers)
+            elif method_upper == "POST":
+                json_body = json.loads(body) if body else None
+                response = client.post(url, headers=headers, json=json_body)
+            elif method_upper == "PUT":
+                json_body = json.loads(body) if body else None
+                response = client.put(url, headers=headers, json=json_body)
+            elif method_upper == "DELETE":
+                response = client.delete(url, headers=headers)
+            elif method_upper == "PATCH":
+                json_body = json.loads(body) if body else None
+                response = client.patch(url, headers=headers, json=json_body)
+            else:
+                return json.dumps({
+                    "status_code": 400,
+                    "body": {"error": f"Unsupported HTTP method: {method}"}
+                })
+
+            # Parse response body
+            try:
+                response_body = response.json()
+            except json.JSONDecodeError:
+                response_body = response.text
+
+            result = json.dumps({
+                "status_code": response.status_code,
+                "body": response_body
+            })
+
+            print(f"API returned status {response.status_code}", file=sys.stderr)
+            return result
+
+    except httpx.RequestError as e:
+        error_msg = f"Error: Request failed - {str(e)}"
+        print(error_msg, file=sys.stderr)
+        return json.dumps({
+            "status_code": 0,
+            "body": {"error": str(e)}
+        })
+    except json.JSONDecodeError as e:
+        error_msg = f"Error: Invalid JSON in request body - {str(e)}"
+        print(error_msg, file=sys.stderr)
+        return json.dumps({
+            "status_code": 400,
+            "body": {"error": f"Invalid JSON body: {str(e)}"}
+        })
+    except Exception as e:
+        error_msg = f"Error: {str(e)}"
+        print(error_msg, file=sys.stderr)
+        return json.dumps({
+            "status_code": 0,
+            "body": {"error": str(e)}
+        })
+
+
 def execute_tool(tool_name: str, args: dict) -> str:
     """
     Execute a tool call and return the result.
@@ -218,6 +321,13 @@ def execute_tool(tool_name: str, args: dict) -> str:
         return read_file(args.get("path", ""))
     elif tool_name == "list_files":
         return list_files(args.get("path", ""))
+    elif tool_name == "query_api":
+        return query_api(
+            args.get("method", "GET"),
+            args.get("path", ""),
+            args.get("body"),
+            args.get("auth", True)
+        )
     else:
         error_msg = f"Error: Unknown tool '{tool_name}'"
         print(error_msg, file=sys.stderr)
@@ -236,7 +346,7 @@ def get_tool_definitions() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": "Read the contents of a file from the project repository. Use this to read documentation files in the wiki/ directory.",
+                "description": "Read the contents of a file from the project repository. Use this to read documentation files in the wiki/ directory, source code in backend/, or configuration files.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -253,7 +363,7 @@ def get_tool_definitions() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "list_files",
-                "description": "List files and directories at a given path. Use this to explore the wiki/ directory structure.",
+                "description": "List files and directories at a given path. Use this to explore the wiki/ directory structure or other directories in the project.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -263,6 +373,35 @@ def get_tool_definitions() -> list[dict]:
                         }
                     },
                     "required": ["path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "query_api",
+                "description": "Call the backend API to query data or check system behavior. Use this for questions about: data in the database (e.g., item counts), API behavior (e.g., status codes), runtime errors, or analytics. NOT for reading source code or documentation.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "method": {
+                            "type": "string",
+                            "description": "HTTP method (GET, POST, PUT, DELETE, etc.)"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "API path (e.g., '/items/', '/analytics/completion-rate')"
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": "Optional JSON request body (for POST/PUT requests)"
+                        },
+                        "auth": {
+                            "type": "boolean",
+                            "description": "Whether to send authentication header (default: true). Set to false to test unauthenticated access."
+                        }
+                    },
+                    "required": ["method", "path"]
                 }
             }
         }
@@ -276,19 +415,50 @@ def get_system_prompt() -> str:
     Returns:
         System prompt string
     """
-    return """You are a documentation assistant for a software engineering lab.
-You have access to two tools:
-- list_files: List files in a directory
-- read_file: Read the contents of a file
+    return """You are a documentation and system assistant for a software engineering lab.
+You have access to three tools:
+- list_files: List files in a directory. Use this to explore the project structure.
+- read_file: Read the contents of a file. Use this to read:
+  - Documentation in wiki/ directory
+  - Source code in backend/ directory
+  - Configuration files (docker-compose.yml, Dockerfile, etc.)
+- query_api: Call the backend API. Use this for questions about:
+  - Data in the database (e.g., "How many items are stored?")
+  - API behavior (e.g., "What status code does /items/ return without auth?")
+  - Runtime errors or analytics endpoints
+  - Any question that requires querying the running system
+
+The query_api tool has an optional `auth` parameter (default: true). Set auth=false to test
+unauthenticated access and see what status code the API returns without credentials.
 
 To answer questions:
-1. Use list_files to explore the wiki/ directory structure if you're unsure where to look
-2. Use read_file to read relevant files and find the answer
-3. In your final answer (when you stop using tools), include:
-   - The answer to the question
-   - A source reference in format: wiki/filename.md#section-anchor
+1. For wiki/documentation questions → use read_file on wiki/ files
+2. For source code questions → use read_file on backend/ or other source files
+3. For configuration questions → use read_file on docker-compose.yml, Dockerfile, etc.
+4. For data/API questions → use query_api to query the running backend
+5. Use list_files to discover files when you're unsure where to look
+6. In your final answer, include a source reference:
+   - For wiki files: wiki/filename.md#section-anchor
+   - For source code: backend/path/to/file.py
+   - For config files: docker-compose.yml or Dockerfile
 
-Do not make up information. Only answer based on what you read from files.
+When asked to find bugs or risky code:
+- Look for division operations (e.g., `a / b`) where the denominator could be zero or None
+- Look for sorting operations (e.g., `sorted()`) on values that could be None
+- Look for None-unsafe operations: calling methods on values that might be None, arithmetic with None
+- Check if there are guards like `if x is not None` before risky operations
+- When you find a risky operation, explain what error would occur (e.g., ZeroDivisionError, TypeError)
+
+When asked to compare error handling strategies:
+- Read all relevant files first (e.g., etl.py AND router files)
+- Identify how each module handles errors:
+  - Does it use try/except blocks? What exceptions are caught?
+  - Does it raise HTTPException with specific status codes?
+  - Does it return default/empty values on error?
+  - Does it use assertions or validation?
+- Compare the approaches: which is more defensive? Which provides better error messages?
+
+Do not make up information. Only answer based on what you read from files or query from the API.
 When you have enough information to answer, provide your final answer without using any tools."""
 
 
@@ -462,6 +632,7 @@ def extract_source_from_answer(answer: str) -> str:
     - wiki/filename.md#anchor
     - See wiki/filename.md
     - Source: wiki/filename.md
+    - backend/app/.../file.py
 
     Args:
         answer: The LLM's answer text
@@ -470,15 +641,30 @@ def extract_source_from_answer(answer: str) -> str:
         Source reference string, or empty string if not found
     """
     import re
-    
+
     # Look for wiki/... patterns
     wiki_pattern = r'(wiki/[\w\-/]+\.md(?:#[\w\-]+)?)'
     matches = re.findall(wiki_pattern, answer)
-    
+
     if matches:
         # Return the first match
         return matches[0]
-    
+
+    # Look for backend/... patterns
+    backend_pattern = r'(backend/[\w\-/]+\.py)'
+    matches = re.findall(backend_pattern, answer)
+
+    if matches:
+        # Return the first match
+        return matches[0]
+
+    # Look for docker-compose.yml or Dockerfile
+    docker_pattern = r'((?:docker-compose\.yml|Dockerfile))'
+    matches = re.findall(docker_pattern, answer, re.IGNORECASE)
+
+    if matches:
+        return matches[0]
+
     return ""
 
 
